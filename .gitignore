@@ -428,6 +428,7 @@ lib64/
 venv/
 .env/
 .venv/
+**/.env
 
 
 # Sphinx
