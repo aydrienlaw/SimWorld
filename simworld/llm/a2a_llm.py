@@ -4,6 +4,7 @@ import io
 import json
 import re
 import time
+from typing import Optional
 
 import cv2
 import numpy as np
@@ -17,9 +18,16 @@ from .base_llm import BaseLLM
 
 class A2ALLM(BaseLLM):
     """Local Planner (Activity to Action) LLM class for handling interactions with language models."""
-    def __init__(self, model_name: str = 'gpt-4o-mini', url: str = None, provider: str = 'openai'):
+    def __init__(
+        self,
+        model_name: str = 'gpt-4o-mini',
+        url: str = None,
+        provider: str = 'openai',
+        azure_endpoint: Optional[str] = None,
+        azure_api_version: Optional[str] = None,
+    ):
         """Initialize the Local Planner LLM."""
-        super().__init__(model_name, url, provider)
+        super().__init__(model_name, url, provider, azure_endpoint, azure_api_version)
 
         self.logger = Logger.get_logger('A2ALLM')
 
@@ -39,6 +47,8 @@ class A2ALLM(BaseLLM):
             return self._generate_instructions_openai(system_prompt, user_prompt, images, max_tokens, temperature, top_p, response_format)
         elif self.provider == 'openrouter':
             return self._generate_instructions_openrouter(system_prompt, user_prompt, images, max_tokens, temperature, top_p, response_format)
+        elif self.provider == 'azure':
+            return self._generate_instructions_azure(system_prompt, user_prompt, images, max_tokens, response_format)
         else:
             raise ValueError(f'Invalid provider: {self.provider}')
 
@@ -47,7 +57,6 @@ class A2ALLM(BaseLLM):
         user_content = []
         user_content.append({'type': 'text', 'text': user_prompt})
 
-        # self.logger.info(f'user_content: {user_content}')
         for image in images:
             img_data = self._process_image_to_base64(image)
             user_content.append({
@@ -72,7 +81,6 @@ class A2ALLM(BaseLLM):
         return action_json, time.time() - start_time
 
     def _generate_instructions_openrouter(self, system_prompt, user_prompt, images=[], max_tokens=None, temperature=0.7, top_p=1.0, response_format=BaseModel):
-
         start_time = time.time()
         user_content = []
         user_prompt += '\nPlease respond in valid JSON format following this schema: ' + str(response_format.to_json_schema())
@@ -105,6 +113,46 @@ class A2ALLM(BaseLLM):
             action_json = None
         else:
             action_json = self._extract_json_and_fix_escapes(action_response)
+
+        return action_json, time.time() - start_time
+
+    def _generate_instructions_azure(self, system_prompt, user_prompt, images=[], max_tokens=None, response_format=BaseModel):
+        """Generate instructions using Azure OpenAI Responses API.
+
+        Args:
+            system_prompt (str): The system prompt.
+            user_prompt (str): The user prompt.
+            images (list): Images to include (as numpy arrays).
+            max_tokens (int): Maximum number of output tokens.
+            response_format (BaseModel): Expected response structure.
+        """
+        start_time = time.time()
+
+        # Build input content list
+        input_content = [{'type': 'input_text', 'text': user_prompt}]
+        for image in images:
+            img_data = self._process_image_to_base64(image)
+            input_content.append({
+                'type': 'input_image',
+                'image_url': f'data:image/jpeg;base64,{img_data}',
+            })
+
+        # Append JSON schema instruction to system prompt
+        schema_instruction = '\nRespond only in valid JSON following this schema: ' + json.dumps(response_format.model_json_schema())
+        full_instructions = system_prompt + schema_instruction
+
+        action_json = None
+        try:
+            response = self.client.responses.create(
+                model=self.model_name,
+                instructions=full_instructions,
+                input=input_content,
+                max_output_tokens=max_tokens,
+            )
+            raw = response.output_text
+            action_json = self._extract_json_and_fix_escapes(raw)
+        except Exception as e:
+            self.logger.error(f'Error in generate_instructions_azure: {e}')
 
         return action_json, time.time() - start_time
 

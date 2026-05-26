@@ -33,22 +33,29 @@ class BaseLLM(metaclass=LLMMetaclass):
         self,
         model_name: str,
         url: Optional[str] = None,
-        provider: Optional[str] = 'openai'
+        provider: Optional[str] = 'openai',
+        azure_endpoint: Optional[str] = None,
+        azure_api_version: Optional[str] = None,
     ):
         """Initialize the LLM client. Default uses OpenAI's API.
 
         Args:
             model_name: Name of the model to use.
             url: Base URL for the API. If None, uses OpenAI's default URL.
-            provider: Provider to use. Can be 'openai', 'openrouter', or 'local'.
+            provider: Provider to use. Can be 'openai', 'openrouter', 'local', or 'azure'.
                       Use 'local' for vLLM and other local OpenAI-compatible servers.
+                      Use 'azure' for Azure OpenAI.
+            azure_endpoint: Azure OpenAI endpoint URL. Required if provider is 'azure'.
+                            Example: 'https://your-resource.openai.azure.com'
+            azure_api_version: Azure OpenAI API version. Required if provider is 'azure'.
+                               Example: '2025-04-01-preview'
 
         Raises:
             ValueError: If no valid API key is provided or if the URL is invalid.
         """
-        # Get API key from environment if not provided
         openai_api_key = os.getenv('OPENAI_API_KEY')
         openrouter_api_key = os.getenv('OPENROUTER_API_KEY')
+        azure_api_key = os.getenv('AZURE_OPENAI_API_KEY')
 
         self.provider = provider
 
@@ -63,6 +70,14 @@ class BaseLLM(metaclass=LLMMetaclass):
         elif provider == 'local':
             # For local models (vLLM, etc.), API key is not required
             self.api_key = os.getenv('OPENAI_API_KEY', 'not-needed')
+        elif provider == 'azure':
+            if not azure_api_key:
+                raise ValueError('No Azure OpenAI API key provided. Please set AZURE_OPENAI_API_KEY environment variable.')
+            if not azure_endpoint:
+                raise ValueError('azure_endpoint is required for Azure OpenAI provider.')
+            if not azure_api_version:
+                raise ValueError('azure_api_version is required for Azure OpenAI provider.')
+            self.api_key = azure_api_key
         else:
             raise ValueError(f'Not supported provider: {provider}')
 
@@ -70,20 +85,27 @@ class BaseLLM(metaclass=LLMMetaclass):
             url = None
 
         try:
-            self.client = openai.OpenAI(
-                api_key=self.api_key,
-                base_url=url,
-            )
-            # Validate the API key for cloud providers
-            # Skip validation for local providers as they may not implement models.list()
-            if provider != 'local':
-                self.client.models.list()
+            if provider == 'azure':
+                self.client = openai.AzureOpenAI(
+                    api_key=self.api_key,
+                    azure_endpoint=azure_endpoint,
+                    api_version=azure_api_version,
+                )
+            else:
+                self.client = openai.OpenAI(
+                    api_key=self.api_key,
+                    base_url=url,
+                )
+                # Validate the API key for cloud providers
+                # Skip validation for local and azure providers
+                if provider == 'openai':
+                    self.client.models.list()
         except Exception as e:
-            raise ValueError(f'Failed to initialize OpenAI client: {str(e)}')
+            raise ValueError(f'Failed to initialize LLM client: {str(e)}')
 
         self.model_name = model_name
         self.logger = Logger.get_logger('BaseLLM')
-        self.logger.info(f'Initialized LLM client for model -- {model_name}, url -- {url or "default"}')
+        self.logger.info(f'Initialized LLM client for model -- {model_name}, provider -- {provider}')
 
     def generate_text(
         self,
@@ -129,15 +151,24 @@ class BaseLLM(metaclass=LLMMetaclass):
         top_p: float = None,
         **kwargs,
     ) -> str:
-        response = self.client.chat.completions.create(
-            model=self.model_name,
-            messages=[
-                {'role': 'system', 'content': system_prompt},
-                {'role': 'user', 'content': user_prompt},
-            ],
-            max_tokens=max_tokens,
-            temperature=temperature,
-            top_p=top_p,
-            **kwargs,
-        )
-        return response.choices[0].message.content
+        if self.provider == 'azure':
+            response = self.client.responses.create(
+                model=self.model_name,
+                instructions=system_prompt,
+                input=user_prompt,
+                max_output_tokens=max_tokens,
+            )
+            return response.output_text
+        else:
+            response = self.client.chat.completions.create(
+                model=self.model_name,
+                messages=[
+                    {'role': 'system', 'content': system_prompt},
+                    {'role': 'user', 'content': user_prompt},
+                ],
+                max_tokens=max_tokens,
+                temperature=temperature,
+                top_p=top_p,
+                **kwargs,
+            )
+            return response.choices[0].message.content
